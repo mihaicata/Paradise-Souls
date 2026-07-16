@@ -42,6 +42,45 @@ const store = {
   set(k,v){ try{ localStorage.setItem('plsl_'+k, JSON.stringify(v)); }catch(e){} }
 };
 
+// ---------- privacy-respecting session analytics ----------
+// This static site deliberately does not collect IP addresses, request headers,
+// precise location, or raw keystrokes. Fill these two public values from your
+// Supabase project; never place a service-role/secret key in this file.
+const SUPABASE_URL = 'https://qjqbcoqgkucmylylujmz.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY = 'postgresql://postgres:[YOUR-PASSWORD]@db.qjqbcoqgkucmylylujmz.supabase.co:5432/postgres';
+const SUPABASE_FUNCTION = 'ingest-session';
+const Analytics = {
+  session: null, accessToken: null,
+  begin(hero){
+    const consent = confirm('Allow anonymous gameplay analytics for research?\n\nThis records aggregate game actions only (for example jumps, attacks, chapters, and relics). It does not collect IP address, location, request data, or typed keys.');
+    const id = 'session-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,8);
+    this.session = { id, hero, startedAt:new Date().toISOString(), endedAt:null, consent,
+      chapters:[], events:{jumps:0, rolls:0, attacks:0, heals:0, kills:0, deaths:0, relics:0, beacons:0, damageTaken:0, bossesDefeated:0}, points:0, insights:{} };
+  },
+  event(kind, amount=1){ if(!this.session || !this.session.consent) return; this.session.events[kind] = (this.session.events[kind]||0)+amount; },
+  chapterStarted(book){ if(this.session && this.session.consent) { this.session.chapterStartedAt=performance.now(); this.session.currentBook=book; } },
+  finishChapter(book, embers){
+    if(!this.session) return;
+    const seconds = Math.max(1, Math.round((performance.now()-(this.session.chapterStartedAt||performance.now()))/1000));
+    if(!this.session.chapters.some(c=>c.book===book)) this.session.chapters.push({book, seconds, completedAt:new Date().toISOString()});
+    const e=this.session.events, chapters=this.session.chapters.length;
+    const strategy = e.rolls + e.heals ? Math.round((e.rolls*1.5 + e.heals + e.bossesDefeated*8) / Math.max(1,e.deaths+1) * 10)/10 : 0;
+    const speed = Math.max(0, 900-seconds);
+    this.session.insights = { playStyle: e.attacks > e.rolls*3 ? 'aggressive striker' : e.rolls > e.attacks/2 ? 'evasive tactician' : 'balanced adventurer', strategyRating:strategy, averageChapterSeconds:Math.round(this.session.chapters.reduce((n,c)=>n+c.seconds,0)/chapters) };
+    this.session.points = Math.round(chapters*1000 + e.relics*75 + e.bossesDefeated*300 + embers*2 + speed + strategy*30 - e.deaths*100);
+    this.session.lastUpdatedAt = new Date().toISOString(); this.saveLeaderboard(); this.sync();
+  },
+  saveLeaderboard(){
+    if(!this.session || !this.session.consent) return;
+    const board=store.get('leaderboard', []), uses=board.filter(x=>x.hero===this.session.hero).length;
+    const entry={hero:this.session.hero, score:Math.max(0,this.session.points-uses*50), chapters:this.session.chapters.length, relics:this.session.events.relics, deaths:this.session.events.deaths, style:this.session.insights.playStyle, updatedAt:this.session.lastUpdatedAt};
+    const at=board.findIndex(x=>x.sessionId===this.session.id); if(at>=0) board[at]={...entry,sessionId:this.session.id}; else board.push({...entry,sessionId:this.session.id});
+    store.set('leaderboard', board.sort((a,b)=>b.score-a.score).slice(0,25));
+  },
+  async sync(){ if(!this.session || !this.session.consent || !SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) return; try{ if(!this.accessToken){ const r=await fetch(SUPABASE_URL.replace(/\/$/,'')+'/auth/v1/signup',{method:'POST',headers:{'Content-Type':'application/json','apikey':SUPABASE_PUBLISHABLE_KEY},body:'{}'}); const a=await r.json(); this.accessToken=a.access_token || a.session?.access_token; } if(!this.accessToken) return; await fetch(SUPABASE_URL.replace(/\/$/,'')+'/functions/v1/'+SUPABASE_FUNCTION,{method:'POST',headers:{'Content-Type':'application/json','apikey':SUPABASE_PUBLISHABLE_KEY,'Authorization':'Bearer '+this.accessToken},body:JSON.stringify(this.session),keepalive:true}); }catch(e){} },
+};
+function beginSession(){ const hero=prompt('Name thy hero (1–24 characters):', store.get('lastHero','')); if(!hero || !hero.trim()) return false; const name=hero.trim().slice(0,24); store.set('lastHero',name); Analytics.begin(name); return true; }
+
 // ---------- audio ----------
 const AU = { ctx:null, muted: store.get('mute', false), musicTimer:null, step:0, boss:false };
 function auInit(){
@@ -310,6 +349,7 @@ function rebuildEnemies(L){
 
 // ---------- level entry / respawn ----------
 function startChapter(ch){
+  Analytics.chapterStarted(ch.n);
   G.ch = ch;
   G.lv = genLevel(ch);
   G.spawn = {x:150, y:440-42};
@@ -359,21 +399,21 @@ function updatePlayer(dt){
 
   // jump (Claw double-jump — wings!)
   if(tap('Space')||tap('KeyW')||tap('ArrowUp')){
-    if(P.onGround){ P.vy = -JUMPV*Math.sqrt(G.ch.grav); P.onGround=false; P.jumps=1; sfx('jump'); }
-    else if(P.jumps < 2){ P.vy = -DJUMPV*Math.sqrt(G.ch.grav); P.jumps=2; P.wingT=0.3; sfx('wing');
+    if(P.onGround){ Analytics.event('jumps'); P.vy = -JUMPV*Math.sqrt(G.ch.grav); P.onGround=false; P.jumps=1; sfx('jump'); }
+    else if(P.jumps < 2){ Analytics.event('jumps'); P.vy = -DJUMPV*Math.sqrt(G.ch.grav); P.jumps=2; P.wingT=0.3; sfx('wing');
       spawnParts(P.x+P.w/2, P.y+P.h, 8, G.ch.pal.glow, 90, 40); }
   }
   // roll
   if((tap('KeyK')||tap('KeyX')||tap('ShiftLeft')||tap('ShiftRight')) && !rolling && P.rollCD<=0 && P.st>=25){
-    P.rollT = 0.34; P.rollCD = 0.5; P.st -= 25; P.stDelay = 0.45; sfx('roll');
+    Analytics.event('rolls'); P.rollT = 0.34; P.rollCD = 0.5; P.st -= 25; P.stDelay = 0.45; sfx('roll');
   }
   // attack
   if((tap('KeyJ')||tap('KeyZ')) && P.atkCD<=0 && !rolling && P.st>=18){
-    P.atkT = 0.16; P.atkCD = 0.4; P.st -= 18; P.stDelay = 0.45; P.swing++; sfx('swing');
+    Analytics.event('attacks'); P.atkT = 0.16; P.atkCD = 0.4; P.st -= 18; P.stDelay = 0.45; P.swing++; sfx('swing');
   }
   // flask
   if((tap('KeyL')||tap('KeyC')) && P.flasks>0 && P.healT<=0 && P.hp < P.maxHp){
-    P.flasks--; P.healT = 0.6; sfx('flask');
+    Analytics.event('heals'); P.flasks--; P.healT = 0.6; sfx('flask');
     P.hp = Math.min(P.maxHp, P.hp + Math.ceil(P.maxHp*0.45));
     spawnParts(P.x+P.w/2, P.y+P.h/2, 14, '#ffb347', 70, 60);
   }
@@ -416,7 +456,7 @@ function updatePlayer(dt){
         e.x += P.face*12; sfx('hit'); G.shake = Math.max(G.shake, 4);
         spawnParts(e.x+e.w/2, e.y+e.h/2, 8, '#ff5a4d', 120);
         if(e.hp <= 0){
-          e.dead = true;
+          e.dead = true; Analytics.event('kills');
           const gain = 10 + G.ch.n*4 + (e.type==='caster'?6:0);
           G.embers += gain; sfx('ember');
           spawnParts(e.x+e.w/2, e.y+e.h/2, 16, G.ch.pal.glow, 140, 60);
@@ -447,7 +487,7 @@ function updatePlayer(dt){
   for(const tr of L.treasures){
     if(tr.taken) continue;
     if(rectHit(tr, P)){
-      tr.taken = true;
+      tr.taken = true; Analytics.event('relics');
       if(tr.kind === 'flask'){
         P.flasks = Math.min(P.flaskMax, P.flasks+1);
         popup('Vial of Wrath +1', tr.x, tr.y-12, '#ffb347'); sfx('flask');
@@ -477,7 +517,7 @@ function updatePlayer(dt){
     if(Math.abs(P.x+P.w/2 - bc.x) < 42 && Math.abs((P.y+P.h) - bc.y) < 60){
       G.nearBeacon = bc;
       if(tap('KeyE')){
-        bc.lit = true;
+        bc.lit = true; Analytics.event('beacons');
         G.spawn = {x:bc.x-P.w/2, y:bc.y-P.h};
         P.hp = P.maxHp; P.flasks = P.flaskMax;
         rebuildEnemies(L); G.projs = [];
@@ -512,6 +552,7 @@ function updatePlayer(dt){
   if(L.exit.open && rectHit(L.exit, P)){
     G.completed.add(G.ch.n);
     G.embers += 60;
+    Analytics.finishChapter(G.ch.n, G.embers);
     saveMeta();
     G.state = 'clear'; G.clearT = 0;
     sfx('felled');
@@ -520,7 +561,7 @@ function updatePlayer(dt){
 
 function damagePlayer(dmg, srcX){
   if(P.iT > 0 || P.dead) return;
-  P.hp -= dmg;
+  P.hp -= dmg; Analytics.event('damageTaken', dmg);
   P.iT = 0.9; P.healT = 0;
   P.vx = (P.x > srcX ? 1 : -1) * 260; P.vy = -220;
   G.shake = Math.max(G.shake, 8);
@@ -530,7 +571,7 @@ function damagePlayer(dmg, srcX){
 }
 function killPlayer(){
   if(P.dead) return;
-  P.dead = true;
+  P.dead = true; Analytics.event('deaths');
   if(G.embers > 0){
     G.drop = {ch:G.ch.n, x:P.lastGround.x+P.w/2, y:P.lastGround.y+P.h-10, amt:G.embers};
     G.embers = 0;
@@ -542,7 +583,7 @@ function killPlayer(){
   G.shake = 12;
 }
 function fellBoss(b){
-  b.dead = true;
+  b.dead = true; Analytics.event('bossesDefeated');
   AU.boss = false;
   const gain = 200 + G.ch.n*60;
   G.embers += gain;
@@ -1318,7 +1359,7 @@ function drawTitle(){
   if(Math.floor(G.t*1.6)%2===0) text('PRESS ENTER', W/2, 400, 20, '#e8d5a0');
   text('twelve books · twelve trials · one fall', W/2, 448, 13, '#5c5238');
   text('M — mute', W/2, 510, 11, '#44403a');
-  if(tap('Enter') || mouse.click){ G.state='select'; sfx('ui'); }
+  if(tap('Enter') || mouse.click){ if(beginSession()){ G.state='select'; sfx('ui'); } }
 }
 
 function selectCards(){
@@ -1367,7 +1408,16 @@ function drawSelect(){
   }
   if(tap('Enter')){ startChapter(CHAPTERS[G.sel]); sfx('bonfire'); }
   if(tap('Escape')) G.state = 'title';
-  text('arrows / mouse — choose        ENTER — descend        ESC — back', W/2, 512, 13, '#5c5238');
+  text('arrows / mouse — choose   ENTER — descend   T — leaderboard   ESC — back', W/2, 512, 13, '#5c5238');
+  if(tap('KeyT')) G.state='leaderboard';
+}
+
+function drawLeaderboard(){
+  ctx.fillStyle='#070409'; ctx.fillRect(0,0,W,H); text('H A L L   O F   T H E   F A L L E N',W/2,58,27,'#e8d5a0');
+  const rows=store.get('leaderboard',[]); if(!rows.length) text('No completed books recorded on this device.',W/2,240,16,'#8a7a52');
+  rows.slice(0,8).forEach((r,i)=>{ const y=108+i*42; ctx.fillStyle=i===0?'rgba(110,78,20,.5)':'rgba(20,16,24,.8)'; ctx.fillRect(150,y-25,660,34); text(String(i+1),178,y,15,'#ffd700'); text(r.hero,212,y,16,'#e8d5a0','left'); text(r.style||'balanced',490,y,13,'#b8a878','left'); text('Books '+r.chapters+' · Relics '+r.relics,620,y,12,'#8a7a52','left'); text(String(r.score),780,y,16,'#9adcff','right'); });
+  if(Analytics.session) text('Current: '+Analytics.session.hero+' · '+(Analytics.session.insights.playStyle||'adventurer'),W/2,486,13,'#8a7a52');
+  text('ESC / ENTER — return',W/2,522,13,'#5c5238'); if(tap('Escape')||tap('Enter')) G.state='select';
 }
 
 function drawIntro(){
@@ -1434,6 +1484,7 @@ function frame(now){
   if(G.state === 'title') drawTitle();
   else if(G.state === 'select') drawSelect();
   else if(G.state === 'intro') drawIntro();
+  else if(G.state === 'leaderboard') drawLeaderboard();
   else if(G.state === 'play'){
     if(tap('Escape')||tap('KeyP')) G.paused = !G.paused;
     if(!G.paused){
