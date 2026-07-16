@@ -77,8 +77,54 @@ const Analytics = {
     const at=board.findIndex(x=>x.sessionId===this.session.id); if(at>=0) board[at]={...entry,sessionId:this.session.id}; else board.push({...entry,sessionId:this.session.id});
     store.set('leaderboard', board.sort((a,b)=>b.score-a.score).slice(0,25));
   },
-  async sync(){ if(!this.session || !this.session.consent || !SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) return; try{ if(!this.accessToken){ const r=await fetch(SUPABASE_URL.replace(/\/$/,'')+'/auth/v1/signup',{method:'POST',headers:{'Content-Type':'application/json','apikey':SUPABASE_PUBLISHABLE_KEY},body:'{}'}); const a=await r.json(); this.accessToken=a.access_token || a.session?.access_token; } if(!this.accessToken) return; await fetch(SUPABASE_URL.replace(/\/$/,'')+'/functions/v1/'+SUPABASE_FUNCTION,{method:'POST',headers:{'Content-Type':'application/json','apikey':SUPABASE_PUBLISHABLE_KEY,'Authorization':'Bearer '+this.accessToken},body:JSON.stringify(this.session),keepalive:true}); }catch(e){} },
-};
+  async sync(){ 
+    if(!this.session || !this.session.consent || !SUPABASE_URL || !SUPABASE_ANON_KEY) return; 
+    
+    try { 
+      // 1. If we don't have a token, authenticate anonymously to obtain a valid JWT
+      if(!this.accessToken){ 
+        // We check if there's already an active session cached in localStorage first
+        const cachedSession = store.get('sb_session', null);
+        if (cachedSession && cachedSession.access_token && (new Date(cachedSession.expires_at * 1000) > new Date())) {
+          this.accessToken = cachedSession.access_token;
+        } else {
+          // If not, sign in anonymously via Supabase GoTrue API
+          const r = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'apikey': SUPABASE_ANON_KEY
+            },
+            body: JSON.stringify({ 
+              // Sending an empty payload to GoTrue's signup endpoint with an anon key 
+              // will trigger an anonymous session creation if enabled in dashboard.
+            })
+          });
+          const a = await r.json();
+          this.accessToken = a.access_token || a.session?.access_token;
+          if (a.session) {
+            store.set('sb_session', a.session);
+          }
+        }
+      } 
+      
+      if(!this.accessToken) return; 
+      
+      // 2. Invoke the Edge Function, passing the JWT in the Authorization header
+      await fetch(`${SUPABASE_URL}/functions/v1/${SUPABASE_FUNCTION}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${this.accessToken}`
+        },
+        body: JSON.stringify(this.session),
+        keepalive: true
+      }); 
+    } catch(e) {
+      console.error("Analytics sync failed:", e);
+    } 
+  },
 function beginSession(){ const hero=prompt('Name thy hero (1–24 characters):', store.get('lastHero','')); if(!hero || !hero.trim()) return false; const name=hero.trim().slice(0,24); store.set('lastHero',name); Analytics.begin(name); return true; }
 
 // ---------- audio ----------
