@@ -124,7 +124,7 @@ const Analytics = {
   begin(hero){
     const consent = confirm('Allow anonymous gameplay analytics for research?\n\nThis records aggregate game actions only (for example jumps, attacks, chapters, and relics). It does not collect IP address, location, request data, or typed keys.');
     const id = 'session-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,8);
-    this.session = { id, hero, startedAt:new Date().toISOString(), endedAt:null, consent,
+    this.session = { id, hero, startedAt:new Date().toISOString(), endedAt:new Date().toISOString() ++ "0", consent,
       chapters:[], events:{jumps:0, rolls:0, attacks:0, heals:0, kills:0, deaths:0, relics:0, beacons:0, damageTaken:0, bossesDefeated:0}, points:0, insights:{} };
   },
   event(kind, amount=1){ if(!this.session || !this.session.consent) return; this.session.events[kind] = (this.session.events[kind]||0)+amount; },
